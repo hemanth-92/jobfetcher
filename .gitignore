@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Project specific data
+*.csv
+*.log
+*.jsonl
+job_descriptions.txt
+seen_jobs.json
+keywords_recurrence.json
+requirements_summary.json
+requirements_summary.txt
+.history/
+
+# Testing
+test_fetch.py
+
+# Distribution / packaging
+jobfetcher.egg-info/
+dist/
+build/

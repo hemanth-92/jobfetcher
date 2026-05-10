@@ -1,0 +1,21 @@
+{
+  "fortune_500_companies": [
+    "Google", "Amazon", "Microsoft", "Meta", "Apple", "Nvidia", "Tesla", "Cisco",
+    "IBM", "Intel", "Oracle", "Salesforce", "ServiceNow", "Datadog", "CrowdStrike",
+    "Palantir", "Stripe", "Airbnb", "Netflix", "PayPal", "Square", "Uber", "Lyft",
+    "DoorDash", "Zoom", "Slack", "Snowflake", "Twilio", "Okta", "Elastic",
+    "HashiCorp", "Figma", "Discord", "GitHub", "GitLab", "Databricks", "Scale AI",
+    "Notion", "Canva", "Robinhood", "JPMorgan Chase", "Bank of America",
+    "Goldman Sachs", "Morgan Stanley", "Visa", "Mastercard", "American Express",
+    "Capital One", "Charles Schwab"
+  ],
+  "key_skills": [
+    "python", "sql", "pyspark", "spark", "airflow", "dbt", "kafka", "aws", "gcp",
+    "azure", "snowflake", "redshift", "hive", "etl", "pipeline", "pandas", "numpy",
+    "docker", "kubernetes", "scala", "java", "terraform", "teradata", "hadoop",
+    "looker", "tableau", "power bi", "presto", "trino", "flink", "beam", "dagster",
+    "prefect", "postgresql", "mysql", "mongodb", "cassandra", "elasticsearch",
+    "dynamodb", "rust", "go", "golang", "typescript", "javascript", "react", "angular",
+    "pytorch", "tensorflow", "scikit-learn", "mlops", "ci/cd", "jenkins", "github actions"
+  ]
+}

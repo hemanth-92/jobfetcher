@@ -1,0 +1,21 @@
+[project]
+name = "jobfetcher"
+version = "0.1.0"
+description = "Aggregate and analyze job listings from multiple sources"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2",
+    "pandas>=2.3.3",
+    "playwright>=1.59.0",
+    "playwright-stealth>=2.0.3",
+    "python-jobspy @ git+https://github.com/hemanth-92/JobSpy.git",
+    "requests",
+]
+
+[project.scripts]
+jobfetcher = "jobfetcher.main:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
