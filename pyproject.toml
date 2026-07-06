@@ -3,19 +3,36 @@ name = "jobfetcher"
 version = "0.1.0"
 description = "Aggregate and analyze job listings from multiple sources"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
     "numpy>=2",
     "pandas>=2.3.3",
+    "pydantic>=2",
+    "python-jobspy @ git+https://github.com/hemanth-92/JobSpy.git@fda080a373e8226f3fd60635323f5da9af9892b1",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+playwright = [
     "playwright>=1.59.0",
     "playwright-stealth>=2.0.3",
-    "python-jobspy @ git+https://github.com/hemanth-92/JobSpy.git",
-    "requests",
 ]
 
 [project.scripts]
 jobfetcher = "jobfetcher.main:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jobfetcher*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

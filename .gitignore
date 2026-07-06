@@ -9,7 +9,8 @@ env/
 venv/
 ENV/
 
-# Project specific data
+# Project outputs
+results/
 *.csv
 *.log
 *.jsonl
@@ -18,6 +19,10 @@ seen_jobs.json
 keywords_recurrence.json
 requirements_summary.json
 requirements_summary.txt
+market_summary.json
+market_summary.txt
+jobs_links.csv
+jobs.html
 .history/
 
 # Testing

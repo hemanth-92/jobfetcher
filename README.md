@@ -1,47 +1,55 @@
 # Job Fetcher
 
-Aggregate and analyze job listings from multiple sources (LinkedIn, Indeed, Remotive, Adzuna).
+Collect job listings, browse them through clickable links, and analyze the full job market.
 
-## Features
-- **Aggregator**: Concurrently scrapes and fetches jobs from multiple platforms.
-- **Analyzer**: Filters for mid-level roles and extracts key requirements/skills.
-- **Tracking**: Keeps track of seen job URLs to avoid duplicates across runs.
-- **Trends**: Logs job trends and keyword recurrence over time.
+## What you get
+
+All outputs are written to the `results/` folder by default:
+
+| File | Purpose |
+|------|---------|
+| `results/jobs.html` | **Best for browsing** — clickable job titles |
+| `results/jobs_links.csv` | Compact spreadsheet with `job_url` links |
+| `results/jobs.csv` | Full job details plus analysis fields |
+| `results/market_summary.txt` | Market analysis across **all** jobs |
+| `results/market_summary.json` | Same analysis in JSON |
+| `results/mid_jobs.csv` | Optional mid-level subset |
 
 ## Installation
-
-Ensure you have `uv` installed.
 
 ```bash
 uv sync
 ```
 
-## Usage
+## Recommended workflow
 
-Run the main fetcher:
 ```bash
-uv run jobfetcher \
-  --search-terms "data engineer, software engineer" \
-  --locations "India, Remote" \
-  --site-names "linkedin,indeed,remotive" \
-  --results 50 \
-  --top 30
+uv run jobfetcher --workers 6 --reset-seen
 ```
 
-Or using python directly:
+Then open:
+- `results/jobs.html` for clickable links
+- `results/market_summary.txt` for market trends
+
+Re-analyze without fetching:
+
 ```bash
-python main.py --search-terms "data engineer"
+uv run jobfetcher --analyze-only
 ```
 
-## Structure
-- `main.py`: Entry point and CLI.
-- `jobfetcher/`: Core package.
-    - `aggregator.py`: Job collection logic.
-    - `analyzer.py`: Post-processing and analysis.
-- `scripts/`: Utility scripts (e.g., Playwright scraper).
-- `jobs.csv`: Full job details (generated).
-- `job_trends.log`: Historical trends (generated).
-- `mid_jobs.csv`: Mid-level roles extracted (generated).
+Use a different output folder:
+
+```bash
+uv run jobfetcher --output-dir my-run
+```
+
+## Useful flags
+
+- `--output-dir results` — where all files are saved (default: `results`)
+- `--top 0` — keep all fetched jobs
+- `--reset-seen` — clear duplicate tracking for a fresh fetch
+- `--analyze-only` — rebuild reports from `results/jobs.csv`
 
 ## Configuration
-Update `jobfetcher/aggregator.py` to modify the list of Fortune 500 companies or other defaults.
+
+Edit `config.json` at the project root to update Fortune 500 companies, key skills, and other defaults.

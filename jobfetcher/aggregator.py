@@ -1,34 +1,59 @@
-import csv
 import json
 import logging
 import re
 import time
+import warnings
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, List, Optional, Dict, Any
+from typing import Iterable, List, Optional, Tuple
 
-import requests
 import pandas as pd
+import requests
 from jobspy import scrape_jobs
-from .models import Job
+from jobspy.util import markdown_converter
 
-# Configuration
+from .config import load_config
+from .models import validate_jobs_dataframe
+
 TREND_LOG_FILE = "job_trends.log"
 SEEN_JOBS_FILE = "seen_jobs.json"
 
-def load_config(path: str = "config.json") -> Dict[str, Any]:
-    """Load configuration from JSON file."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logging.error(f"Failed to load config: {e}")
-        return {"fortune_500_companies": [], "key_skills": []}
+ADZUNA_COUNTRY_CURRENCY = {
+    "us": "USD",
+    "in": "INR",
+    "gb": "GBP",
+    "bd": "BDT",
+}
 
 CONFIG = load_config()
 FORTUNE_500_COMPANIES = CONFIG.get("fortune_500_companies", [])
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AggregationStats:
+    queries_run: int = 0
+    fetched: int = 0
+    deduped: int = 0
+    seen_skipped: int = 0
+    invalid_skipped: int = 0
+    title_filtered: int = 0
+    final_count: int = 0
+
+
+def _concat_job_frames(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    """Concatenate job frames while avoiding pandas dtype warnings."""
+    cleaned = [
+        frame.dropna(axis=1, how="all")
+        for frame in frames
+        if isinstance(frame, pd.DataFrame) and not frame.empty
+    ]
+    if not cleaned:
+        return pd.DataFrame()
+    return pd.concat(cleaned, ignore_index=True, sort=False)
 
 
 def load_seen_job_urls(path: str = SEEN_JOBS_FILE) -> set:
@@ -70,7 +95,13 @@ def scrape_with_retry(
             if is_remote_only:
                 scrape_params["is_remote"] = True
 
-            return scrape_jobs(**scrape_params)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=".*`dict` method is deprecated.*",
+                    category=DeprecationWarning,
+                )
+                return scrape_jobs(**scrape_params)
         except Exception as exc:
             logger.warning("Error scraping %s@%s: %s", search_term, location, exc)
             if attempt == max_retries:
@@ -104,8 +135,12 @@ def extract_trend_keywords(rows: pd.DataFrame, top_n: int = 12) -> List[tuple]:
 def append_trend_log(jobs: pd.DataFrame, path: str = TREND_LOG_FILE) -> None:
     """Append current job search summary and trends to a log file."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fortune_500_jobs = jobs[jobs.get("is_fortune_500", False)]
-    other_jobs = jobs[~jobs.get("is_fortune_500", False)]
+    if "is_fortune_500" in jobs.columns:
+        is_fortune_500 = jobs["is_fortune_500"].fillna(False)
+    else:
+        is_fortune_500 = pd.Series(False, index=jobs.index)
+    fortune_500_jobs = jobs[is_fortune_500]
+    other_jobs = jobs[~is_fortune_500]
 
     job_type_counts = jobs.get("job_type", pd.Series()).fillna("unknown").value_counts().to_dict()
 
@@ -163,7 +198,6 @@ def fetch_remotive(keyword: str, limit: int = 50) -> pd.DataFrame:
             # Clean description
             desc = job.get("description", "")
             if desc:
-                from jobspy.util import markdown_converter
                 desc = markdown_converter(desc)
 
             jobs.append({
@@ -230,7 +264,6 @@ def fetch_adzuna(
             # Clean description
             desc = job.get("description", "")
             if desc:
-                from jobspy.util import markdown_converter
                 desc = markdown_converter(desc)
 
             jobs.append({
@@ -244,7 +277,7 @@ def fetch_adzuna(
                 "description": desc,
                 "min_amount": min_amount,
                 "max_amount": max_amount,
-                "currency": "USD" if country == "us" else "INR",
+                "currency": ADZUNA_COUNTRY_CURRENCY.get(country, "USD"),
                 "is_remote": "remote" in (job.get("description") or "").lower(),
             })
         return pd.DataFrame(jobs)
@@ -253,70 +286,164 @@ def fetch_adzuna(
         return pd.DataFrame()
 
 
-def collect_jobs_for_query(
+def _fetch_from_site(
+    site: str,
     search_term: str,
     location: str,
     is_remote_only: bool,
-    seen_urls: set,
-    results_wanted: int = 50,
-    site_names: Optional[List[str]] = None,
-    adzuna_creds: Optional[dict] = None,
+    results_wanted: int,
+    adzuna_creds: Optional[dict],
 ) -> pd.DataFrame:
-    """Collect jobs for a single query (term + location) from all specified sources."""
-    site_names = site_names or ["linkedin"]
+    """Fetch jobs from a single site for one search term and location."""
+    logger.info("Fetching jobs from %s for '%s' in %s...", site, search_term, location)
     frames: List[pd.DataFrame] = []
-    
-    # Handle each site individually for better isolation and variety
-    for site in site_names:
-        logger.info(f"Fetching jobs from {site} for '{search_term}' in {location}...")
-        if site == "remotive":
-            df = fetch_remotive(search_term, limit=results_wanted)
+
+    if site == "remotive":
+        df = fetch_remotive(search_term, limit=results_wanted)
+        if not df.empty:
+            frames.append(df)
+    elif site == "adzuna":
+        if adzuna_creds:
+            df = fetch_adzuna(
+                search_term,
+                location,
+                limit=results_wanted,
+                app_id=adzuna_creds.get("app_id"),
+                app_key=adzuna_creds.get("app_key"),
+            )
             if not df.empty:
-                df["source_query"] = search_term
-                df["source_location"] = location
                 frames.append(df)
-        elif site == "adzuna":
-            if adzuna_creds:
-                df = fetch_adzuna(
-                    search_term, 
-                    location, 
-                    limit=results_wanted, 
-                    app_id=adzuna_creds.get("app_id"), 
-                    app_key=adzuna_creds.get("app_key")
-                )
-                if not df.empty:
-                    df["source_query"] = search_term
-                    df["source_location"] = location
-                    frames.append(df)
-        else:
-            # JobSpy sites (linkedin, indeed, etc.)
-            offsets = [0]
-            if results_wanted > 50:
-                offsets.append(50)
-            
-            for offset in offsets:
-                df = scrape_with_retry(
-                    site_name=[site],
-                    search_term=search_term,
-                    location=location,
-                    is_remote_only=is_remote_only,
-                    results_wanted=results_wanted,
-                    offset=offset,
-                )
-                if isinstance(df, pd.DataFrame) and not df.empty:
-                    df = df.copy()
-                    df["source_query"] = search_term
-                    df["source_location"] = location
-                    df["source_offset"] = offset
-                    frames.append(df)
+    else:
+        offsets = [0]
+        if results_wanted > 50:
+            offsets.append(50)
+
+        for offset in offsets:
+            df = scrape_with_retry(
+                site_name=[site],
+                search_term=search_term,
+                location=location,
+                is_remote_only=is_remote_only,
+                results_wanted=results_wanted,
+                offset=offset,
+            )
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df = df.copy()
+                df["source_offset"] = offset
+                frames.append(df)
 
     if not frames:
         return pd.DataFrame()
 
-    combined = pd.concat(frames, ignore_index=True)
-    combined = combined.drop_duplicates(subset=["job_url"], keep="first")
-    combined = combined[~combined["job_url"].isin(seen_urls)]
+    combined = _concat_job_frames(frames)
+    combined["source_query"] = search_term
+    combined["source_location"] = location
     return combined
+
+
+def collect_jobs_for_query(
+    search_term: str,
+    location: str,
+    is_remote_only: bool,
+    results_wanted: int = 50,
+    site_names: Optional[List[str]] = None,
+    adzuna_creds: Optional[dict] = None,
+    max_workers: int = 4,
+) -> pd.DataFrame:
+    """Collect jobs for a single query (term + location) from all specified sources."""
+    site_names = site_names or ["linkedin"]
+    frames: List[pd.DataFrame] = []
+    worker_count = max(1, min(max_workers, len(site_names)))
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(
+                _fetch_from_site,
+                site,
+                search_term,
+                location,
+                is_remote_only,
+                results_wanted,
+                adzuna_creds,
+            ): site
+            for site in site_names
+        }
+        for future in as_completed(futures):
+            site = futures[future]
+            try:
+                df = future.result()
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    frames.append(df)
+            except Exception as exc:
+                logger.error("Failed fetching from %s for '%s' in %s: %s", site, search_term, location, exc)
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = _concat_job_frames(frames)
+    return combined.drop_duplicates(subset=["job_url"], keep="first")
+
+
+def _collect_query_task(
+    search_term: str,
+    location: str,
+    is_remote_only: bool,
+    results_wanted: int,
+    site_names: Optional[List[str]],
+    adzuna_creds: Optional[dict],
+    max_workers: int,
+) -> pd.DataFrame:
+    """Worker wrapper for parallel query collection."""
+    return collect_jobs_for_query(
+        search_term=search_term,
+        location=location,
+        is_remote_only=is_remote_only,
+        results_wanted=results_wanted,
+        site_names=site_names,
+        adzuna_creds=adzuna_creds,
+        max_workers=max_workers,
+    )
+
+
+def _log_aggregation_summary(stats: AggregationStats, seen_file: str) -> None:
+    """Log a breakdown of how many jobs survived each pipeline stage."""
+    if stats.final_count:
+        logger.info(
+            "Aggregation summary: fetched=%d, deduped=%d, seen_skipped=%d, "
+            "invalid=%d, title_filtered=%d, final=%d",
+            stats.fetched,
+            stats.deduped,
+            stats.seen_skipped,
+            stats.invalid_skipped,
+            stats.title_filtered,
+            stats.final_count,
+        )
+        return
+
+    if stats.fetched == 0:
+        logger.warning(
+            "No jobs returned from any source for %d queries. "
+            "Check network connectivity, site availability, or try different search terms.",
+            stats.queries_run,
+        )
+        return
+
+    if stats.seen_skipped == stats.deduped:
+        logger.warning(
+            "All %d fetched jobs were already tracked in %s. "
+            "Use --reset-seen to clear history or --include-seen to allow duplicates.",
+            stats.deduped,
+            seen_file,
+        )
+        return
+
+    logger.warning(
+        "No jobs left after filtering (fetched=%d, seen_skipped=%d, invalid=%d, title_filtered=%d).",
+        stats.fetched,
+        stats.seen_skipped,
+        stats.invalid_skipped,
+        stats.title_filtered,
+    )
 
 
 def aggregate_jobs(
@@ -329,52 +456,108 @@ def aggregate_jobs(
     seen_file: str = SEEN_JOBS_FILE,
     adzuna_creds: Optional[dict] = None,
     append_mode: bool = False,
+    max_workers: int = 4,
+    include_seen: bool = False,
+    reset_seen: bool = False,
 ) -> pd.DataFrame:
     """Run multiple queries, deduplicate, filter and return a dataframe of top jobs."""
+    stats = AggregationStats()
+    if reset_seen:
+        save_seen_job_urls([], seen_file)
+        logger.info("Cleared seen job history at %s", seen_file)
+
     seen_urls = load_seen_job_urls(seen_file)
+    if seen_urls and not include_seen:
+        logger.info("Tracking %d previously seen job URLs in %s", len(seen_urls), seen_file)
+
     all_frames: List[pd.DataFrame] = []
     remote_map = remote_map or {}
+    query_tasks: List[Tuple[str, str, bool]] = [
+        (term, location, remote_map.get(location, False))
+        for location in locations
+        for term in search_terms
+    ]
+    stats.queries_run = len(query_tasks)
+    worker_count = max(1, min(max_workers, len(query_tasks)))
 
-    for location in locations:
-        is_remote = remote_map.get(location, False)
-        for term in search_terms:
-            df = collect_jobs_for_query(
-                search_term=term,
-                location=location,
-                is_remote_only=is_remote,
-                seen_urls=seen_urls,
-                results_wanted=results_wanted,
-                site_names=site_names,
-                adzuna_creds=adzuna_creds,
-            )
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                all_frames.append(df)
-                # Update seen_urls in memory to avoid duplicates across terms/locations
-                seen_urls.update(df["job_url"].astype(str).tolist())
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(
+                _collect_query_task,
+                term,
+                location,
+                is_remote,
+                results_wanted,
+                site_names,
+                adzuna_creds,
+                max_workers,
+            ): (term, location)
+            for term, location, is_remote in query_tasks
+        }
+        for future in as_completed(futures):
+            term, location = futures[future]
+            try:
+                df = future.result()
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    all_frames.append(df)
+            except Exception as exc:
+                logger.error("Failed query '%s' in %s: %s", term, location, exc)
 
     if not all_frames:
+        _log_aggregation_summary(stats, seen_file)
         return pd.DataFrame()
 
-    jobs = pd.concat(all_frames, ignore_index=True)
+    jobs = _concat_job_frames(all_frames)
+    stats.fetched = len(jobs)
     jobs = jobs.drop_duplicates(subset=["job_url"], keep="first")
+    stats.deduped = len(jobs)
+
+    if not include_seen:
+        before_seen = len(jobs)
+        jobs = jobs[~jobs["job_url"].astype(str).isin(seen_urls)]
+        stats.seen_skipped = before_seen - len(jobs)
+        if stats.seen_skipped:
+            logger.info("Skipped %d jobs already tracked in %s", stats.seen_skipped, seen_file)
+
+    before_validation = len(jobs)
+    jobs = validate_jobs_dataframe(jobs)
+    stats.invalid_skipped = before_validation - len(jobs)
+    if stats.invalid_skipped:
+        logger.info("Dropped %d invalid job records during validation", stats.invalid_skipped)
+
+    if jobs.empty:
+        _log_aggregation_summary(stats, seen_file)
+        return pd.DataFrame()
 
     # Broad filtering for relevant roles
     relevant_keywords = r"data|analytics|etl|software|engineer|developer|devops|backend|ml|pipeline|infrastructure|warehouse"
+    before_title = len(jobs)
     jobs = jobs[jobs["title"].str.contains(relevant_keywords, case=False, na=False)]
+    stats.title_filtered = before_title - len(jobs)
+    if stats.title_filtered:
+        logger.info("Filtered out %d jobs with non-matching titles", stats.title_filtered)
+
+    if jobs.empty:
+        _log_aggregation_summary(stats, seen_file)
+        return pd.DataFrame()
 
     # Flag top companies
     pattern = "|".join(re.escape(c) for c in FORTUNE_500_COMPANIES)
     jobs["is_fortune_500"] = jobs["company"].str.contains(pattern, case=False, na=False)
 
     if append_mode:
-        # In append mode, we return all new filtered jobs
+        stats.final_count = len(jobs)
+        _log_aggregation_summary(stats, seen_file)
         return jobs
 
-    # Sort and pick top N: Fortune 500 first, then by location
+    # Sort by priority; optionally cap to top N (0 keeps all jobs)
     jobs = (
         jobs.sort_values(by=["is_fortune_500", "source_location"], ascending=[False, True])
         .reset_index(drop=True)
-        .head(top_n)
     )
+    if top_n > 0:
+        jobs = jobs.head(top_n)
+    stats.final_count = len(jobs)
+    _log_aggregation_summary(stats, seen_file)
 
     return jobs
