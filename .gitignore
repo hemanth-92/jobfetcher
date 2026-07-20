@@ -14,14 +14,9 @@ results/
 *.csv
 *.log
 *.jsonl
-job_descriptions.txt
+.seen_jobs.json
 seen_jobs.json
-keywords_recurrence.json
-requirements_summary.json
-requirements_summary.txt
 market_summary.json
-market_summary.txt
-jobs_links.csv
 jobs.html
 .history/
 
@@ -29,6 +24,6 @@ jobs.html
 test_fetch.py
 
 # Distribution / packaging
-jobfetcher.egg-info/
 dist/
 build/
+*.egg-info/

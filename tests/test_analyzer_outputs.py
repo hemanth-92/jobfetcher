@@ -7,8 +7,8 @@ def test_analyzer_creates_nested_output_directory(tmp_path):
     input_csv = tmp_path / "jobs.csv"
     nested_dir = tmp_path / "results"
     outputs = AnalyzerOutputs(
-        mid_csv=str(nested_dir / "mid.csv"),
-        mid_jsonl=str(nested_dir / "mid.jsonl"),
+        links_html=str(nested_dir / "jobs.html"),
+        summary_json=str(nested_dir / "market_summary.json"),
     )
 
     pd.DataFrame(
@@ -26,18 +26,15 @@ def test_analyzer_creates_nested_output_directory(tmp_path):
     run_market_analysis(input_csv=str(input_csv), outputs=outputs)
 
     assert nested_dir.exists()
-    assert (nested_dir / "mid.csv").exists()
-    assert (nested_dir / "mid.jsonl").exists()
+    assert (nested_dir / "jobs.html").exists()
+    assert (nested_dir / "market_summary.json").exists()
 
 
 def test_analyzer_writes_custom_output_paths(tmp_path):
     input_csv = tmp_path / "jobs.csv"
     outputs = AnalyzerOutputs(
-        mid_csv=str(tmp_path / "mid.csv"),
-        mid_jsonl=str(tmp_path / "mid.jsonl"),
+        links_html=str(tmp_path / "browse.html"),
         summary_json=str(tmp_path / "summary.json"),
-        summary_txt=str(tmp_path / "summary.txt"),
-        recurrence_file=str(tmp_path / "keywords.json"),
     )
 
     pd.DataFrame(
@@ -54,8 +51,8 @@ def test_analyzer_writes_custom_output_paths(tmp_path):
 
     run_market_analysis(input_csv=str(input_csv), outputs=outputs)
 
-    assert (tmp_path / "mid.csv").exists()
-    assert (tmp_path / "mid.jsonl").exists()
+    assert (tmp_path / "browse.html").exists()
     assert (tmp_path / "summary.json").exists()
-    assert (tmp_path / "summary.txt").exists()
-    assert (tmp_path / "keywords.json").exists()
+    # Only the two analyzer deliverables — no legacy side files
+    assert not (tmp_path / "mid.csv").exists()
+    assert not (tmp_path / "summary.txt").exists()

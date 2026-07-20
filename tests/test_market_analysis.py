@@ -23,13 +23,8 @@ def test_enrich_jobs_dataframe_adds_market_fields():
 def test_run_market_analysis_writes_reports(tmp_path):
     input_csv = tmp_path / "jobs.csv"
     outputs = AnalyzerOutputs(
-        links_csv=str(tmp_path / "jobs_links.csv"),
         links_html=str(tmp_path / "jobs.html"),
-        mid_csv=str(tmp_path / "mid_jobs.csv"),
-        mid_jsonl=str(tmp_path / "mid_jobs.jsonl"),
         summary_json=str(tmp_path / "market_summary.json"),
-        summary_txt=str(tmp_path / "market_summary.txt"),
-        recurrence_file=str(tmp_path / "keywords.json"),
     )
 
     pd.DataFrame(
@@ -58,8 +53,18 @@ def test_run_market_analysis_writes_reports(tmp_path):
     enriched = run_market_analysis(input_csv=str(input_csv), outputs=outputs)
     summary = (tmp_path / "market_summary.json").read_text(encoding="utf-8")
 
+    # Soft mode: keep both roles; rank ideal fits higher via match_score
     assert len(enriched) == 2
-    assert (tmp_path / "jobs_links.csv").exists()
+    assert "match_score" in enriched.columns
+    assert "in_experience_band" in enriched.columns
+    de = enriched[enriched["title"] == "Data Engineer"].iloc[0]
+    senior = enriched[enriched["title"] == "Senior Data Engineer"].iloc[0]
+    assert de["match_score"] > senior["match_score"]
+    assert bool(de["in_experience_band"]) is True
+    assert bool(senior["in_experience_band"]) is False
     assert (tmp_path / "jobs.html").exists()
-    assert (tmp_path / "market_summary.txt").exists()
+    assert (tmp_path / "market_summary.json").exists()
+    assert not (tmp_path / "jobs_links.csv").exists()
+    assert not (tmp_path / "market_summary.txt").exists()
+    assert not (tmp_path / "mid_jobs.csv").exists()
     assert '"total_jobs": 2' in summary

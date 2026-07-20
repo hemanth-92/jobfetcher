@@ -8,13 +8,15 @@ from typing import Dict, List, Optional
 
 from .aggregator import (
     aggregate_jobs,
-    append_trend_log,
     load_seen_job_urls,
     save_seen_job_urls,
 )
 from . import analyzer
 from .analyzer import AnalyzerOutputs, ProfileFilter
+from .config import load_config
 from .paths import DEFAULT_OUTPUT_DIR, OutputPaths, ensure_output_dir, ensure_parent_dir
+
+CONFIG = load_config()
 
 
 def _parse_list(value: str) -> List[str]:
@@ -24,23 +26,13 @@ def _parse_list(value: str) -> List[str]:
 
 def _build_analyzer_outputs(
     output_paths: OutputPaths,
-    links_csv: Optional[str] = None,
     links_html: Optional[str] = None,
-    mid_jobs_output: Optional[str] = None,
-    mid_jobs_jsonl: Optional[str] = None,
     market_json: Optional[str] = None,
-    market_txt: Optional[str] = None,
-    keywords_recurrence: Optional[str] = None,
 ) -> AnalyzerOutputs:
     analyzer_outputs = AnalyzerOutputs.from_output_paths(output_paths)
     overrides = {
-        "links_csv": links_csv,
         "links_html": links_html,
-        "mid_csv": mid_jobs_output,
-        "mid_jsonl": mid_jobs_jsonl,
         "summary_json": market_json,
-        "summary_txt": market_txt,
-        "recurrence_file": keywords_recurrence,
     }
     return replace(
         analyzer_outputs,
@@ -51,16 +43,24 @@ def _build_analyzer_outputs(
 def run_market_analysis(
     output: str,
     analyzer_outputs: AnalyzerOutputs,
-    skip_mid_level: bool = False,
     profile: Optional[ProfileFilter] = None,
+    filter_experience: Optional[bool] = None,
+    exclude_senior: Optional[bool] = None,
+    experience_min: Optional[int] = None,
+    experience_max: Optional[int] = None,
+    keep_unknown_years: Optional[bool] = None,
 ) -> None:
     """Analyze an existing jobs CSV and write market reports."""
     try:
         enriched = analyzer.run_market_analysis(
             input_csv=output,
             outputs=analyzer_outputs,
-            export_mid_level=not skip_mid_level,
             profile=profile,
+            filter_experience=filter_experience,
+            exclude_senior=exclude_senior,
+            experience_min=experience_min,
+            experience_max=experience_max,
+            keep_unknown_years=keep_unknown_years,
         )
         if enriched.empty:
             logging.error("No jobs found in %s to analyze.", output)
@@ -70,13 +70,7 @@ def run_market_analysis(
         enriched.to_csv(output, quoting=csv.QUOTE_NONNUMERIC, escapechar="\\", index=False)
         logging.info("Updated %s with market analysis fields.", output)
         logging.info("Open %s in a browser for clickable job links.", analyzer_outputs.links_html)
-        logging.info("Market summary written to %s", analyzer_outputs.summary_txt)
-        if profile is not None:
-            logging.info(
-                "Profile matches (if any) saved to %s and %s",
-                analyzer_outputs.profile_csv,
-                analyzer_outputs.profile_html,
-            )
+        logging.info("Market summary written to %s", analyzer_outputs.summary_json)
     except (FileNotFoundError, KeyError, ValueError, OSError) as exc:
         logging.error("Failed to run market analysis: %s", exc)
         sys.exit(1)
@@ -99,15 +93,17 @@ def run_fetcher(
     max_workers: int = 4,
     include_seen: bool = False,
     reset_seen: bool = False,
-    skip_mid_level: bool = False,
     profile: Optional[ProfileFilter] = None,
+    filter_experience: Optional[bool] = None,
+    exclude_senior: Optional[bool] = None,
+    experience_min: Optional[int] = None,
+    experience_max: Optional[int] = None,
+    keep_unknown_years: Optional[bool] = None,
 ) -> None:
     """Execute the job fetching and analysis pipeline."""
     remote_map = {loc: True for loc in remote_locations}
     output = str(output_paths.jobs_csv)
-    descriptions_output = str(output_paths.descriptions_txt)
     seen_file = str(output_paths.seen_jobs)
-    trend_log = str(output_paths.trend_log)
 
     jobs = aggregate_jobs(
         search_terms=search_terms,
@@ -128,7 +124,6 @@ def run_fetcher(
         return
 
     ensure_parent_dir(output)
-    ensure_parent_dir(descriptions_output)
     if append:
         jobs.to_csv(output, mode="a", header=False, quoting=csv.QUOTE_NONNUMERIC, escapechar="\\", index=False)
         logging.info("Appended %d job listings to %s", len(jobs), output)
@@ -136,62 +131,56 @@ def run_fetcher(
         jobs.to_csv(output, quoting=csv.QUOTE_NONNUMERIC, escapechar="\\", index=False)
         logging.info("Saved %d job listings to %s", len(jobs), output)
 
-    with open(descriptions_output, "w", encoding="utf-8") as handle:
-        for i, (_, row) in enumerate(jobs.iterrows()):
-            handle.write(f"JOB #{i + 1}\n")
-            handle.write(f"TITLE: {row.get('title')}\n")
-            handle.write(f"COMPANY: {row.get('company')}\n")
-            handle.write(f"LOCATION: {row.get('location')}\n")
-            handle.write(f"SITE: {row.get('site')}\n")
-            handle.write(f"URL: {row.get('job_url')}\n")
-            handle.write("-" * 40 + "\n")
-            handle.write(f"DESCRIPTION:\n{row.get('description')}\n")
-            handle.write("=" * 80 + "\n\n")
-
     seen = load_seen_job_urls(seen_file)
     seen.update(jobs["job_url"].astype(str).tolist())
     save_seen_job_urls(seen, seen_file)
-    append_trend_log(jobs, path=trend_log)
 
     run_market_analysis(
         output=output,
         analyzer_outputs=analyzer_outputs,
-        skip_mid_level=skip_mid_level,
         profile=profile,
+        filter_experience=filter_experience,
+        exclude_senior=exclude_senior,
+        experience_min=experience_min,
+        experience_max=experience_max,
+        keep_unknown_years=keep_unknown_years,
     )
     logging.info(
-        "Key outputs in %s/: jobs_links.csv, jobs.html, profile_matches.html, market_summary.txt",
+        "Key outputs in %s/: jobs.csv, jobs.html, market_summary.json",
         output_paths.output_dir,
     )
 
 
 def main() -> None:
+    default_search = CONFIG.get("search_terms") or [
+        "data engineer",
+        "analytics engineer",
+        "etl engineer",
+    ]
+    default_locations = CONFIG.get("locations") or ["India", "Remote"]
+    default_remote = CONFIG.get("remote_locations") or default_locations
+    default_exp_min = int(CONFIG.get("experience_min", 2))
+    default_exp_max = int(CONFIG.get("experience_max", 4))
+
     parser = argparse.ArgumentParser(
         description="JobFetcher CLI - Collect job listings and analyze the market"
     )
     parser.add_argument(
         "--search-terms",
         type=_parse_list,
-        default=[
-            "data engineer",
-            "analytics engineer",
-            "etl engineer",
-            "data pipeline engineer",
-            "big data engineer",
-            "python data engineer",
-        ],
+        default=list(default_search),
         help="Comma-separated search terms",
     )
     parser.add_argument(
         "--locations",
         type=_parse_list,
-        default=["India", "Remote"],
+        default=list(default_locations),
         help="Comma-separated locations to search",
     )
     parser.add_argument(
         "--remote-locations",
         type=_parse_list,
-        default=["India", "Remote"],
+        default=list(default_remote),
         help="Locations that should be remote-only (comma-separated)",
     )
     parser.add_argument("--results", type=int, default=100, help="Results per query")
@@ -215,16 +204,14 @@ def main() -> None:
         help="Directory where all output files are written",
     )
     parser.add_argument("--output", help="Override full jobs CSV path")
-    parser.add_argument("--descriptions-output", help="Override job descriptions text file")
-    parser.add_argument("--links-csv", help="Override compact links CSV path")
     parser.add_argument("--links-html", help="Override HTML report path")
-    parser.add_argument("--mid-jobs-output", help="Override mid-level CSV path")
-    parser.add_argument("--mid-jobs-jsonl", help="Override mid-level JSONL path")
     parser.add_argument("--market-json", help="Override market JSON path")
-    parser.add_argument("--market-txt", help="Override market text path")
-    parser.add_argument("--keywords-recurrence", help="Override keyword recurrence path")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
-    parser.add_argument("--append", action="store_true", help="Append new jobs to the output file instead of overwriting")
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append new jobs to the output file instead of overwriting",
+    )
     parser.add_argument(
         "--workers",
         type=int,
@@ -234,12 +221,12 @@ def main() -> None:
     parser.add_argument(
         "--include-seen",
         action="store_true",
-        help="Include jobs already tracked in seen_jobs.json",
+        help="Include jobs already tracked in .seen_jobs.json",
     )
     parser.add_argument(
         "--reset-seen",
         action="store_true",
-        help="Clear seen_jobs.json before fetching",
+        help="Clear .seen_jobs.json before fetching",
     )
     parser.add_argument(
         "--analyze-only",
@@ -247,26 +234,56 @@ def main() -> None:
         help="Skip fetching and analyze the existing jobs CSV",
     )
     parser.add_argument(
-        "--skip-mid-level",
-        action="store_true",
-        help="Skip writing the optional mid-level subset files",
-    )
-    parser.add_argument(
         "--profile-skills",
         type=_parse_list,
-        help="Candidate skills to match (e.g. snowflake,sql,python)",
+        help="Candidate skills to match (defaults to config my_skills)",
+    )
+    parser.add_argument(
+        "--experience-min",
+        type=int,
+        default=default_exp_min,
+        help="Target minimum years of experience (default from config: 2)",
+    )
+    parser.add_argument(
+        "--experience-max",
+        type=int,
+        default=default_exp_max,
+        help="Maximum required years to keep (default from config: 4)",
     )
     parser.add_argument(
         "--profile-min-years",
         type=int,
-        default=2,
-        help="Target minimum years of experience for profile matching",
+        help="Alias for --experience-min",
     )
     parser.add_argument(
         "--profile-max-years",
         type=int,
-        default=6,
-        help="Maximum required years to still count as a profile match",
+        help="Alias for --experience-max",
+    )
+    parser.add_argument(
+        "--hard-experience-filter",
+        action="store_true",
+        help="Hard-drop jobs outside the experience band (soft mode is default)",
+    )
+    parser.add_argument(
+        "--no-experience-filter",
+        action="store_true",
+        help="Alias for soft mode: keep jobs outside the experience band (default)",
+    )
+    parser.add_argument(
+        "--drop-senior",
+        action="store_true",
+        help="Hard-drop senior/staff/lead titles (soft mode keeps them by default)",
+    )
+    parser.add_argument(
+        "--keep-senior",
+        action="store_true",
+        help="Alias for soft mode: keep senior/staff/lead titles (default)",
+    )
+    parser.add_argument(
+        "--drop-unknown-years",
+        action="store_true",
+        help="Drop jobs with no detectable years requirement (only with hard experience filter)",
     )
 
     args = parser.parse_args()
@@ -276,14 +293,16 @@ def main() -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
 
+    exp_min = args.profile_min_years if args.profile_min_years is not None else args.experience_min
+    exp_max = args.profile_max_years if args.profile_max_years is not None else args.experience_max
+
     output_paths = OutputPaths.for_directory(args.output_dir)
     if args.output:
         output_paths = replace(output_paths, jobs_csv=Path(args.output))
-    if args.descriptions_output:
-        output_paths = replace(output_paths, descriptions_txt=Path(args.descriptions_output))
 
     ensure_output_dir(output_paths.output_dir)
     logging.info("Writing outputs to %s/", output_paths.output_dir)
+    logging.info("Experience band: %d–%d years", exp_min, exp_max)
 
     adzuna_creds = None
     if args.adzuna_id and args.adzuna_key:
@@ -291,29 +310,49 @@ def main() -> None:
 
     analyzer_outputs = _build_analyzer_outputs(
         output_paths,
-        links_csv=args.links_csv,
         links_html=args.links_html,
-        mid_jobs_output=args.mid_jobs_output,
-        mid_jobs_jsonl=args.mid_jobs_jsonl,
         market_json=args.market_json,
-        market_txt=args.market_txt,
-        keywords_recurrence=args.keywords_recurrence,
     )
 
-    profile = None
-    if args.profile_skills:
-        profile = ProfileFilter(
-            skills=tuple(skill.lower() for skill in args.profile_skills),
-            min_years=args.profile_min_years,
-            max_years=args.profile_max_years,
-        )
+    skills = args.profile_skills or CONFIG.get("my_skills") or ["python", "sql"]
+    profile = ProfileFilter(
+        skills=tuple(skill.lower() for skill in skills),
+        min_years=exp_min,
+        max_years=exp_max,
+    )
+
+    # Soft mode default: rank by score; optional hard drops via flags/config
+    filter_experience = bool(CONFIG.get("filter_experience_band", False))
+    if args.hard_experience_filter:
+        filter_experience = True
+    if args.no_experience_filter:
+        filter_experience = False
+
+    exclude_senior = bool(CONFIG.get("exclude_senior_titles", False))
+    if args.drop_senior:
+        exclude_senior = True
+    if args.keep_senior:
+        exclude_senior = False
+
+    analysis_kwargs = {
+        "profile": profile,
+        "filter_experience": filter_experience,
+        "exclude_senior": exclude_senior,
+        "experience_min": exp_min,
+        "experience_max": exp_max,
+        "keep_unknown_years": not args.drop_unknown_years,
+    }
+    logging.info(
+        "Mode: %s experience filter, %s senior titles",
+        "HARD" if filter_experience else "SOFT",
+        "drop" if exclude_senior else "keep (ranked)",
+    )
 
     if args.analyze_only:
         run_market_analysis(
             output=str(output_paths.jobs_csv),
             analyzer_outputs=analyzer_outputs,
-            skip_mid_level=args.skip_mid_level,
-            profile=profile,
+            **analysis_kwargs,
         )
         return
 
@@ -331,8 +370,7 @@ def main() -> None:
         max_workers=args.workers,
         include_seen=args.include_seen,
         reset_seen=args.reset_seen,
-        skip_mid_level=args.skip_mid_level,
-        profile=profile,
+        **analysis_kwargs,
     )
 
 

@@ -4,6 +4,8 @@ from typing import Any, Optional
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, HttpUrl, ValidationError
 
+from .dedupe import normalize_job_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,7 +63,7 @@ def normalize_job_record(record: dict[str, Any]) -> Optional[dict[str, Any]]:
         return None
 
     payload = {
-        "job_url": str(job_url).strip(),
+        "job_url": normalize_job_url(job_url) or str(job_url).strip(),
         "title": str(title).strip(),
         "company": _coerce_optional_str(record.get("company")) or "Unknown",
         "location": _coerce_optional_str(record.get("location")) or "Unknown",

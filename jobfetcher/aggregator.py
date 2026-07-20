@@ -15,7 +15,9 @@ from jobspy import scrape_jobs
 from jobspy.util import markdown_converter
 
 from .config import load_config
+from .dedupe import dedupe_jobs, normalize_job_url
 from .models import validate_jobs_dataframe
+from .title_filter import filter_data_engineering_jobs
 
 TREND_LOG_FILE = "job_trends.log"
 SEEN_JOBS_FILE = "seen_jobs.json"
@@ -41,6 +43,8 @@ class AggregationStats:
     seen_skipped: int = 0
     invalid_skipped: int = 0
     title_filtered: int = 0
+    sources_ok: int = 0
+    sources_failed: int = 0
     final_count: int = 0
 
 
@@ -374,8 +378,28 @@ def collect_jobs_for_query(
                 df = future.result()
                 if isinstance(df, pd.DataFrame) and not df.empty:
                     frames.append(df)
+                    logger.info(
+                        "Source ok: %s '%s'@%s → %d jobs",
+                        site,
+                        search_term,
+                        location,
+                        len(df),
+                    )
+                else:
+                    logger.warning(
+                        "Source empty: %s returned 0 jobs for '%s' in %s",
+                        site,
+                        search_term,
+                        location,
+                    )
             except Exception as exc:
-                logger.error("Failed fetching from %s for '%s' in %s: %s", site, search_term, location, exc)
+                logger.error(
+                    "Source failed: %s for '%s' in %s: %s",
+                    site,
+                    search_term,
+                    location,
+                    exc,
+                )
 
     if not frames:
         return pd.DataFrame()
@@ -509,12 +533,22 @@ def aggregate_jobs(
 
     jobs = _concat_job_frames(all_frames)
     stats.fetched = len(jobs)
-    jobs = jobs.drop_duplicates(subset=["job_url"], keep="first")
+    if "job_url" in jobs.columns:
+        jobs["job_url"] = jobs["job_url"].map(normalize_job_url)
+    before_dedupe = len(jobs)
+    jobs = dedupe_jobs(jobs)
     stats.deduped = len(jobs)
+    if before_dedupe != stats.deduped:
+        logger.info(
+            "Deduped jobs: %d → %d (normalized URL + company/title/location)",
+            before_dedupe,
+            stats.deduped,
+        )
 
     if not include_seen:
         before_seen = len(jobs)
-        jobs = jobs[~jobs["job_url"].astype(str).isin(seen_urls)]
+        normalized_seen = {normalize_job_url(url) for url in seen_urls}
+        jobs = jobs[~jobs["job_url"].astype(str).map(normalize_job_url).isin(normalized_seen)]
         stats.seen_skipped = before_seen - len(jobs)
         if stats.seen_skipped:
             logger.info("Skipped %d jobs already tracked in %s", stats.seen_skipped, seen_file)
@@ -529,13 +563,16 @@ def aggregate_jobs(
         _log_aggregation_summary(stats, seen_file)
         return pd.DataFrame()
 
-    # Broad filtering for relevant roles
-    relevant_keywords = r"data|analytics|etl|software|engineer|developer|devops|backend|ml|pipeline|infrastructure|warehouse"
+    # Keep only data-engineering titles (drop backend/frontend/SWE/analyst/etc.)
     before_title = len(jobs)
-    jobs = jobs[jobs["title"].str.contains(relevant_keywords, case=False, na=False)]
+    jobs = filter_data_engineering_jobs(jobs)
     stats.title_filtered = before_title - len(jobs)
     if stats.title_filtered:
-        logger.info("Filtered out %d jobs with non-matching titles", stats.title_filtered)
+        logger.info(
+            "Filtered out %d non data-engineering titles (kept %d)",
+            stats.title_filtered,
+            len(jobs),
+        )
 
     if jobs.empty:
         _log_aggregation_summary(stats, seen_file)

@@ -3,10 +3,10 @@ import pytest
 
 from jobfetcher.analyzer import (
     calculate_mid_level_score,
-    estimate_years,
     is_mid_level_job,
 )
 from jobfetcher.config import DEFAULT_CONFIG_PATH, load_config
+from jobfetcher.years import estimate_years
 
 
 @pytest.mark.parametrize(
@@ -63,4 +63,6 @@ def test_load_config_reads_project_config():
     config = load_config(DEFAULT_CONFIG_PATH)
     assert "key_skills" in config
     assert "fortune_500_companies" in config
+    assert config.get("experience_min") == 2
+    assert config.get("experience_max") == 4
     assert len(config["key_skills"]) > 0
